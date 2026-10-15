@@ -2757,33 +2757,24 @@ class ClusterAPIDriverTest(base.DbTestCase):
             None,
         )
 
-    @mock.patch("novaclient.v2.flavors.FlavorManager", autospec=True)
-    @mock.patch("novaclient.v2.client.Client", autospec=2)
-    @mock.patch("novaclient.client.Client")
     @mock.patch("magnum.common.clients.OpenStackClients.nova")
-    def test_validate_allowed_flavors_ram_error(
-        self,
-        mock_osc_nova,
-        mock_nova_client,
-        mock_versioned_nova_client,
-        mock_flavor_manager,
-    ):
+    def test_validate_allowed_flavors_ram_error(self, mock_osc_nova):
         mock_flavor1 = mock.MagicMock(id=1, vcpus=1)
         mock_flavor1.name = "flavor_tiny"
         mock_flavor2 = mock.MagicMock(id=2, vcpus=1)
         mock_flavor2.name = "flavor_small"
         mock_flavor3 = mock.MagicMock(id=3, vcpus=4)
         mock_flavor3.name = "flavor_medium"
-        # Assumes that the list returned by novaclient.flavors.(min_ram=xxxx)
+        # Assumes that the list returned by nova.flavors.list(min_ram=xxxx)
         # is already filtered so no need to check that.
         filtered_flavors = [
             mock_flavor1,
             mock_flavor2,
             mock_flavor3,
         ]
-        mock_flavor_manager.list.return_value = filtered_flavors
-        mock_versioned_nova_client.flavors = mock_flavor_manager
-        mock_osc_nova.return_value = mock_versioned_nova_client
+        mock_nova = mock.MagicMock()
+        mock_nova.flavors.list.return_value = filtered_flavors
+        mock_osc_nova.return_value = mock_nova
         self.assertRaises(
             exception.MagnumException,
             self.driver._validate_allowed_flavor,
@@ -2791,33 +2782,24 @@ class ClusterAPIDriverTest(base.DbTestCase):
             "DS9",
         )
 
-    @mock.patch("novaclient.v2.flavors.FlavorManager", autospec=True)
-    @mock.patch("novaclient.v2.client.Client", autospec=2)
-    @mock.patch("novaclient.client.Client")
     @mock.patch("magnum.common.clients.OpenStackClients.nova")
-    def test_validate_allowed_flavors_vcpu_error(
-        self,
-        mock_osc_nova,
-        mock_nova_client,
-        mock_versioned_nova_client,
-        mock_flavor_manager,
-    ):
+    def test_validate_allowed_flavors_vcpu_error(self, mock_osc_nova):
         mock_flavor1 = mock.MagicMock(id=1, vcpus=1)
         mock_flavor1.name = "flavor_tiny"
         mock_flavor2 = mock.MagicMock(id=2, vcpus=1)
         mock_flavor2.name = "flavor_small"
         mock_flavor3 = mock.MagicMock(id=3, vcpus=4)
         mock_flavor3.name = "flavor_medium"
-        # Assumes that the list returned by novaclient.flavors.(min_ram=xxxx)
+        # Assumes that the list returned by nova.flavors.list(min_ram=xxxx)
         # is already filtered so no need to check that.
         filtered_flavors = [
             mock_flavor1,
             mock_flavor2,
             mock_flavor3,
         ]
-        mock_flavor_manager.list.return_value = filtered_flavors
-        mock_versioned_nova_client.flavors = mock_flavor_manager
-        mock_osc_nova.return_value = mock_versioned_nova_client
+        mock_nova = mock.MagicMock()
+        mock_nova.flavors.list.return_value = filtered_flavors
+        mock_osc_nova.return_value = mock_nova
         self.assertRaises(
             exception.MagnumException,
             self.driver._validate_allowed_flavor,
@@ -2831,17 +2813,8 @@ class ClusterAPIDriverTest(base.DbTestCase):
             "flavor_small",
         )
 
-    @mock.patch("novaclient.v2.flavors.FlavorManager", autospec=True)
-    @mock.patch("novaclient.v2.client.Client", autospec=2)
-    @mock.patch("novaclient.client.Client")
     @mock.patch("magnum.common.clients.OpenStackClients.nova")
-    def test_validate_allowed_flavors_ram_ok(
-        self,
-        mock_osc_nova,
-        mock_nova_client,
-        mock_versioned_nova_client,
-        mock_flavor_manager,
-    ):
+    def test_validate_allowed_flavors_ram_ok(self, mock_osc_nova):
         mock_flavor1 = mock.MagicMock(id=1, vcpus=1)
         mock_flavor1.name = "flavor_tiny"
         mock_flavor2 = mock.MagicMock(id=2, vcpus=1)
@@ -2853,9 +2826,9 @@ class ClusterAPIDriverTest(base.DbTestCase):
             mock_flavor2,
             mock_flavor3,
         ]
-        mock_flavor_manager.list.return_value = filtered_flavors
-        mock_versioned_nova_client.flavors = mock_flavor_manager
-        mock_osc_nova.return_value = mock_versioned_nova_client
+        mock_nova = mock.MagicMock()
+        mock_nova.flavors.list.return_value = filtered_flavors
+        mock_osc_nova.return_value = mock_nova
         try:
             self.driver._validate_allowed_flavor(self.context, 3)
         except Exception as e:
@@ -2940,17 +2913,8 @@ class ClusterAPIDriverTest(base.DbTestCase):
         except Exception as e:
             self.fail("Raised exception %s" % e)
 
-    @mock.patch("novaclient.v2.flavors.FlavorManager", autospec=True)
-    @mock.patch("novaclient.v2.client.Client", autospec=2)
-    @mock.patch("novaclient.client.Client")
     @mock.patch("magnum.common.clients.OpenStackClients.nova")
-    def test_validate_upgrade_cluster_node_group(
-        self,
-        mock_osc_nova,
-        mock_nova_client,
-        mock_versioned_nova_client,
-        mock_flavor_manager,
-    ):
+    def test_validate_upgrade_cluster_node_group(self, mock_osc_nova):
         mock_flavor1 = mock.MagicMock(id=1, vcpus=1)
         mock_flavor1.name = "flavor_tiny"
         mock_flavor2 = mock.MagicMock(id=2, vcpus=1)
@@ -2962,9 +2926,9 @@ class ClusterAPIDriverTest(base.DbTestCase):
             mock_flavor2,
             mock_flavor3,
         ]
-        mock_flavor_manager.list.return_value = filtered_flavors
-        mock_versioned_nova_client.flavors = mock_flavor_manager
-        mock_osc_nova.return_value = mock_versioned_nova_client
+        mock_nova = mock.MagicMock()
+        mock_nova.flavors.list.return_value = filtered_flavors
+        mock_osc_nova.return_value = mock_nova
         node_group = mock.MagicMock()
         node_group.flavor_id
         mock_template = mock.MagicMock()
