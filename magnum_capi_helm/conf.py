@@ -372,6 +372,25 @@ capi_helm_cluster_labels_opts = [
             "to attach to each node."
         ),
     ),
+    # server groups
+    cfg.StrOpt(
+        "server_group_id",
+        default="",
+        help=(
+            "ID of an existing Nova server group to boot worker nodes into. "
+            "Usually set as a nodegroup label; a nodegroup label takes "
+            "precedence over the cluster and template labels. "
+            "Empty means no server group is used."
+        ),
+    ),
+    cfg.StrOpt(
+        "master_server_group_id",
+        default="",
+        help=(
+            "ID of an existing Nova server group to boot control plane "
+            "nodes into. Empty means no server group is used."
+        ),
+    ),
     # boot volume
     cfg.StrOpt(
         "boot_volume_type",

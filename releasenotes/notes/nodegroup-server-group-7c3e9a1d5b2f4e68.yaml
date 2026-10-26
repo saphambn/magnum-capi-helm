@@ -1,0 +1,13 @@
+---
+features:
+  - |
+    Nodegroups can now be booted into an existing Nova server group, e.g. to
+    spread nodes across hypervisors with an ``anti-affinity`` or
+    ``soft-anti-affinity`` policy. Set the ``server_group_id`` label on a
+    nodegroup (``openstack coe nodegroup create --labels
+    server_group_id=<uuid>``) to pass the server group to its machines. A
+    nodegroup label takes precedence over a ``server_group_id`` cluster or
+    template label. Use the ``master_server_group_id`` cluster label for
+    control plane nodes. The server group must already exist and be visible
+    to the cluster's project; the driver validates this when the cluster or
+    nodegroup is created, and never creates or deletes server groups itself.

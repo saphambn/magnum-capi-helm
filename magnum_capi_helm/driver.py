@@ -549,6 +549,19 @@ class Driver(driver.Driver):
         # NOTE(johngarbutt): filtering untrusted user input
         return re.sub(r"[^a-zA-Z0-9\.\-\/ _]+", "", raw)
 
+    def _nodegroup_label(self, cluster, nodegroup, key, default):
+        """Return a label, preferring the nodegroup's own labels."""
+        if key not in _REGISTERED_LABEL_NAMES:
+            raise ValueError(
+                f"Cluster label '{key}' is not registered in "
+                "capi_helm_cluster_labels. Add it to conf.py first."
+            )
+        raw = (nodegroup.labels or {}).get(key)
+        if raw is None:
+            return self._label(cluster, key, default)
+        # NOTE(johngarbutt): filtering untrusted user input
+        return re.sub(r"[^a-zA-Z0-9\.\-\/ _]+", "", raw)
+
     def _get_label_bool(self, cluster, label, default):
         cluster_label = self._label(cluster, label, "")
         return strutils.bool_from_string(cluster_label, default=default)
@@ -923,6 +936,45 @@ class Driver(driver.Driver):
             f"Minimum {CONF.capi_helm.minimum_flavor_ram} MB required."
         )
 
+    def _get_server_group_id(self, cluster, nodegroup):
+        if nodegroup.role == NODE_GROUP_ROLE_CONTROLLER:
+            return self._label(
+                cluster,
+                "master_server_group_id",
+                CONF.capi_helm_cluster_labels.master_server_group_id,
+            )
+        return self._nodegroup_label(
+            cluster,
+            nodegroup,
+            "server_group_id",
+            CONF.capi_helm_cluster_labels.server_group_id,
+        )
+
+    def _validate_server_group(self, context, cluster, nodegroup):
+        server_group_id = self._get_server_group_id(cluster, nodegroup)
+        if not server_group_id:
+            return
+        if not uuidutils.is_uuid_like(server_group_id):
+            raise exception.MagnumException(
+                message=f"Server group ID {server_group_id} for nodegroup "
+                f"{nodegroup.name} is not a valid UUID."
+            )
+        # Fail early, rather than leaving machines stuck in CAPO, if the
+        # server group does not exist or is not visible to this project.
+        nova = clients.OpenStackClients(context).nova()
+        try:
+            if hasattr(nova.server_groups, "get"):
+                # novaclient
+                nova.server_groups.get(server_group_id)
+            else:
+                # openstacksdk compute proxy
+                nova.get_server_group(server_group_id)
+        except Exception as e:
+            raise exception.MagnumException(
+                message=f"Server group {server_group_id} for nodegroup "
+                f"{nodegroup.name} could not be found: {e}"
+            )
+
     def _is_default_worker_nodegroup(self, cluster, nodegroup):
         return cluster.default_ng_worker.id == nodegroup.id
 
@@ -1148,6 +1200,9 @@ class Driver(driver.Driver):
                     machineFlavor=ng.flavor_id,
                     machineCount=ng.node_count,
                 )
+                server_group_id = self._get_server_group_id(cluster, ng)
+                if server_group_id:
+                    nodegroup_item["serverGroupId"] = server_group_id
                 if self._get_autoscale_enabled(cluster):
                     values = self._get_autoscale_values(cluster, ng)
                     nodegroup_item = helm.mergeconcat(nodegroup_item, values)
@@ -1297,6 +1352,16 @@ class Driver(driver.Driver):
                     "ingress": {"enabled": False},
                 },
             }
+
+            master_server_group_id = self._label(
+                cluster,
+                "master_server_group_id",
+                lconf.master_server_group_id,
+            )
+            if master_server_group_id:
+                values["controlPlane"][
+                    "serverGroupId"
+                ] = master_server_group_id
 
             # Add boot disk details, if defined in config file.
             # Helm chart defaults to ephemeral disks, if unset.
@@ -1457,6 +1522,7 @@ class Driver(driver.Driver):
         nodegroups = cluster.nodegroups
         for ng in nodegroups:
             self._validate_allowed_flavor(context, ng.flavor_id)
+            self._validate_server_group(context, cluster, ng)
         self._validate_cidr_no_overlap(context, cluster)
         # we generate this name (on the initial create call only)
         # so we hit no issues with duplicate cluster names
@@ -1552,6 +1618,7 @@ class Driver(driver.Driver):
     def create_nodegroup(self, context, cluster, nodegroup):
         nodegroup.status = fields.ClusterStatus.CREATE_IN_PROGRESS
         self._validate_allowed_flavor(context, nodegroup.flavor_id)
+        self._validate_server_group(context, cluster, nodegroup)
         if self._get_autoscale_enabled(cluster):
             self._validate_allowed_node_counts(cluster, nodegroup)
         nodegroup.save()

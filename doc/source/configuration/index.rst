@@ -36,6 +36,36 @@ by the user via Magnum labels.
    ``[capi_helm] default_helm_chart_version``.
 
 
+Server groups
+-------------
+
+Worker nodes can be booted into an existing Nova server group, for example to
+spread a nodegroup across hypervisors. Create the server group first, then
+pass its ID with the ``server_group_id`` nodegroup label:
+
+.. code-block:: bash
+
+   openstack server group create --policy soft-anti-affinity my-workers
+   openstack coe nodegroup create my-cluster my-workers \
+       --flavor m1.large --node-count 3 \
+       --labels server_group_id=<server-group-uuid>
+
+A ``server_group_id`` label on the nodegroup takes precedence over one set on
+the cluster or cluster template. Control plane nodes use the separate
+``master_server_group_id`` cluster label. The driver checks that the server
+group exists when the cluster or nodegroup is created, and does not create or
+delete server groups.
+
+.. note::
+
+   With a hard ``anti-affinity`` policy, every node needs its own hypervisor,
+   and rolling upgrades create one extra node at a time. A nodegroup of N
+   nodes therefore needs N+1 hypervisors, and N+1 must fit in the
+   ``server_group_members`` quota (10 by default). Remember to allow for
+   ``max_node_count`` when autoscaling. ``soft-anti-affinity`` avoids these
+   limits.
+
+
 
 Tip & Tricks
 =============

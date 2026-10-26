@@ -18,6 +18,7 @@ from magnum.common import neutron
 from magnum.objects import fields
 from magnum.tests.unit.db import base
 from magnum.tests.unit.objects import utils as obj_utils
+from openstack.compute.v2 import _proxy as compute_proxy
 
 from magnum_capi_helm.common import app_creds
 from magnum_capi_helm.common import ca_certificates
@@ -2610,7 +2611,7 @@ class ClusterAPIDriverTest(base.DbTestCase):
         mock_update,
         mock_validate_allowed_flavor,
     ):
-        node_group = mock.MagicMock()
+        node_group = mock.MagicMock(labels={})
 
         self.driver.create_nodegroup(
             self.context, self.cluster_obj, node_group
@@ -2619,6 +2620,149 @@ class ClusterAPIDriverTest(base.DbTestCase):
         mock_update.assert_called_once_with(self.context, self.cluster_obj)
         node_group.save.assert_called_once_with()
         self.assertEqual("CREATE_IN_PROGRESS", node_group.status)
+
+    @mock.patch.object(driver.Driver, "_validate_server_group")
+    @mock.patch.object(driver.Driver, "_validate_allowed_flavor")
+    @mock.patch.object(driver.Driver, "_update_helm_release")
+    def test_create_nodegroup_validates_server_group(
+        self,
+        mock_update,
+        mock_validate_allowed_flavor,
+        mock_validate_server_group,
+    ):
+        node_group = mock.MagicMock(labels={})
+
+        self.driver.create_nodegroup(
+            self.context, self.cluster_obj, node_group
+        )
+
+        mock_validate_server_group.assert_called_once_with(
+            self.context, self.cluster_obj, node_group
+        )
+
+    def test_get_server_group_id_nodegroup_label(self):
+        sg_id = str(uuid4())
+        ng = mock.MagicMock(role="worker", labels={"server_group_id": sg_id})
+
+        self.assertEqual(
+            sg_id, self.driver._get_server_group_id(self.cluster_obj, ng)
+        )
+
+    def test_get_server_group_id_cluster_label_fallback(self):
+        sg_id = str(uuid4())
+        self._set_cluster_test_labels({"server_group_id": sg_id})
+        ng = mock.MagicMock(role="worker", labels={})
+
+        self.assertEqual(
+            sg_id, self.driver._get_server_group_id(self.cluster_obj, ng)
+        )
+
+    def test_get_server_group_id_nodegroup_label_overrides_cluster(self):
+        ng_sg_id = str(uuid4())
+        self._set_cluster_test_labels({"server_group_id": str(uuid4())})
+        ng = mock.MagicMock(
+            role="worker", labels={"server_group_id": ng_sg_id}
+        )
+
+        self.assertEqual(
+            ng_sg_id, self.driver._get_server_group_id(self.cluster_obj, ng)
+        )
+
+    def test_get_server_group_id_master(self):
+        sg_id = str(uuid4())
+        self._set_cluster_test_labels(
+            {"master_server_group_id": sg_id, "server_group_id": "other"}
+        )
+        ng = mock.MagicMock(role="master", labels={})
+
+        self.assertEqual(
+            sg_id, self.driver._get_server_group_id(self.cluster_obj, ng)
+        )
+
+    def test_get_server_group_id_unset(self):
+        ng = mock.MagicMock(role="worker", labels={})
+
+        self.assertEqual(
+            "", self.driver._get_server_group_id(self.cluster_obj, ng)
+        )
+
+    @mock.patch("magnum.common.clients.OpenStackClients.nova")
+    def test_validate_server_group_unset(self, mock_osc_nova):
+        ng = mock.MagicMock(role="worker", labels={})
+
+        self.driver._validate_server_group(self.context, self.cluster_obj, ng)
+
+        mock_osc_nova.assert_not_called()
+
+    @mock.patch("magnum.common.clients.OpenStackClients.nova")
+    def test_validate_server_group_invalid_uuid(self, mock_osc_nova):
+        ng = mock.MagicMock(
+            role="worker", labels={"server_group_id": "not-a-uuid"}
+        )
+
+        self.assertRaises(
+            exception.MagnumException,
+            self.driver._validate_server_group,
+            self.context,
+            self.cluster_obj,
+            ng,
+        )
+        mock_osc_nova.assert_not_called()
+
+    @mock.patch("magnum.common.clients.OpenStackClients.nova")
+    def test_validate_server_group_ok(self, mock_osc_nova):
+        sg_id = str(uuid4())
+        ng = mock.MagicMock(role="worker", labels={"server_group_id": sg_id})
+
+        self.driver._validate_server_group(self.context, self.cluster_obj, ng)
+
+        mock_osc_nova.return_value.server_groups.get.assert_called_once_with(
+            sg_id
+        )
+
+    @mock.patch("magnum.common.clients.OpenStackClients.nova")
+    def test_validate_server_group_not_found(self, mock_osc_nova):
+        sg_id = str(uuid4())
+        ng = mock.MagicMock(role="worker", labels={"server_group_id": sg_id})
+        mock_osc_nova.return_value.server_groups.get.side_effect = Exception(
+            "not found"
+        )
+
+        self.assertRaises(
+            exception.MagnumException,
+            self.driver._validate_server_group,
+            self.context,
+            self.cluster_obj,
+            ng,
+        )
+
+    @mock.patch("magnum.common.clients.OpenStackClients.nova")
+    def test_validate_server_group_ok_openstacksdk(self, mock_osc_nova):
+        sg_id = str(uuid4())
+        ng = mock.MagicMock(role="worker", labels={"server_group_id": sg_id})
+        # The real openstacksdk proxy also has a server_groups() method
+        mock_nova = mock.create_autospec(compute_proxy.Proxy, instance=True)
+        mock_osc_nova.return_value = mock_nova
+
+        self.driver._validate_server_group(self.context, self.cluster_obj, ng)
+
+        mock_nova.get_server_group.assert_called_once_with(sg_id)
+
+    @mock.patch("magnum.common.clients.OpenStackClients.nova")
+    def test_validate_server_group_not_found_openstacksdk(self, mock_osc_nova):
+        sg_id = str(uuid4())
+        ng = mock.MagicMock(role="worker", labels={"server_group_id": sg_id})
+        mock_nova = mock.create_autospec(compute_proxy.Proxy, instance=True)
+        mock_nova.get_server_group.side_effect = Exception("not found")
+        mock_osc_nova.return_value = mock_nova
+
+        self.assertRaises(
+            exception.MagnumException,
+            self.driver._validate_server_group,
+            self.context,
+            self.cluster_obj,
+            ng,
+        )
 
     @mock.patch.object(driver.Driver, "_validate_allowed_flavor")
     @mock.patch.object(driver.Driver, "_update_helm_release")
@@ -3744,6 +3888,64 @@ class ClusterAPIDriverTest(base.DbTestCase):
         zero_ngs = [ng for ng in node_groups if ng["name"] == new_ng.name]
         self.assertEqual(1, len(zero_ngs))
         self.assertEqual(0, zero_ngs[0]["machineCount"])
+
+    @mock.patch.object(driver.Driver, "_validate_server_group")
+    @mock.patch.object(
+        driver.Driver, "_get_k8s_keystone_auth_enabled", return_value=False
+    )
+    @mock.patch.object(
+        driver.Driver,
+        "_storageclass_definitions",
+        return_value=mock.ANY,
+    )
+    @mock.patch.object(driver.Driver, "_validate_allowed_flavor")
+    @mock.patch.object(helm.HelmLock, "renew", return_value=None)
+    @mock.patch.object(helm.HelmLock, "_acquire_lock", return_value=True)
+    @mock.patch.object(kubernetes.Client, "load", autospec=True)
+    @mock.patch.object(driver.Driver, "_get_image_details", autospec=True)
+    @mock.patch.object(helm.Client, "install_or_upgrade", autospec=True)
+    def test_create_nodegroup_server_group(
+        self,
+        mock_install,
+        mock_image,
+        mock_load,
+        mock_helm_lock,
+        mock_renew,
+        mock_validate_allowed_flavor,
+        mock_storageclasses,
+        mock_get_keystone_auth_enabled,
+        mock_validate_server_group,
+    ):
+        """serverGroupId is only set for nodegroups with the label."""
+        master_sg_id = str(uuid4())
+        sg_id = str(uuid4())
+        self._set_cluster_test_labels({"master_server_group_id": master_sg_id})
+        new_ng = obj_utils.create_test_nodegroup(
+            self.context,
+            uuid=uuid4(),
+            id=790,
+            name="sg-group",
+            labels={"server_group_id": sg_id},
+        )
+        self.cluster_obj.nodegroups.append(new_ng)
+        mock_image.return_value = ("imageid1", "1.27.4", "ubuntu")
+        mock_load.return_value = mock.MagicMock(spec=kubernetes.Client)
+
+        self.driver.create_nodegroup(self.context, self.cluster_obj, new_ng)
+
+        helm_install_values = mock_install.call_args[0][3]
+        self.assertEqual(
+            master_sg_id,
+            helm_install_values["controlPlane"]["serverGroupId"],
+        )
+        node_groups = {
+            ng["name"]: ng for ng in helm_install_values["nodeGroups"]
+        }
+        self.assertEqual(sg_id, node_groups["sg-group"]["serverGroupId"])
+        others = [ng for name, ng in node_groups.items() if name != "sg-group"]
+        self.assertTrue(others)
+        for ng in others:
+            self.assertNotIn("serverGroupId", ng)
 
     @mock.patch.object(
         driver.Driver, "_get_k8s_keystone_auth_enabled", return_value=False
