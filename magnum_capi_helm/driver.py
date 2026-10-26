@@ -30,6 +30,7 @@ from oslo_utils import uuidutils
 from magnum_capi_helm.common import app_creds
 from magnum_capi_helm.common import ca_certificates
 from magnum_capi_helm.common import capi_monitor
+from magnum_capi_helm.common import server_groups
 from magnum_capi_helm import conf
 from magnum_capi_helm import driver_utils
 from magnum_capi_helm import helm
@@ -950,9 +951,75 @@ class Driver(driver.Driver):
             CONF.capi_helm_cluster_labels.server_group_id,
         )
 
+    def _get_server_group_policy(self, cluster, nodegroup):
+        if nodegroup.role == NODE_GROUP_ROLE_CONTROLLER:
+            return self._label(
+                cluster,
+                "master_server_group_policy",
+                CONF.capi_helm_cluster_labels.master_server_group_policy,
+            )
+        return self._nodegroup_label(
+            cluster,
+            nodegroup,
+            "server_group_policy",
+            CONF.capi_helm_cluster_labels.server_group_policy,
+        )
+
+    def _uses_managed_server_group(self, cluster, nodegroup):
+        # An explicit server group ID always wins over a policy
+        return bool(
+            not self._get_server_group_id(cluster, nodegroup)
+            and self._get_server_group_policy(cluster, nodegroup)
+        )
+
+    def _resolve_server_group_ids(self, context, cluster, nodegroups):
+        """Return {nodegroup name: server group ID} for the Helm values.
+
+        Nodegroups with a server group policy, and no explicit server group
+        ID, get a server group that the driver finds or creates here.
+        """
+        server_group_ids = {}
+        policies = {}
+        for ng in nodegroups:
+            server_group_id = self._get_server_group_id(cluster, ng)
+            policy = self._get_server_group_policy(cluster, ng)
+            if server_group_id:
+                server_group_ids[ng.name] = server_group_id
+            elif policy:
+                policies[ng.name] = policy
+        if not policies:
+            return server_group_ids
+
+        existing = {}
+        for name, group_id in server_groups.list_managed(context, cluster):
+            existing.setdefault(name, group_id)
+        for ng_name, policy in policies.items():
+            name = server_groups.managed_name(cluster, ng_name)
+            if name not in existing:
+                # A server group created here would be in the wrong
+                # project, where the cluster's machines cannot use it.
+                if context.project_id != cluster.project_id:
+                    raise exception.MagnumException(
+                        message=f"Server group {name} for nodegroup "
+                        f"{ng_name} must be created by a member of "
+                        f"project {cluster.project_id}."
+                    )
+                existing[name] = server_groups.create(
+                    context, cluster, ng_name, policy
+                )
+            server_group_ids[ng_name] = existing[name]
+        return server_group_ids
+
     def _validate_server_group(self, context, cluster, nodegroup):
         server_group_id = self._get_server_group_id(cluster, nodegroup)
         if not server_group_id:
+            policy = self._get_server_group_policy(cluster, nodegroup)
+            if policy and policy not in server_groups.POLICIES:
+                raise exception.MagnumException(
+                    message=f"Server group policy {policy} for nodegroup "
+                    f"{nodegroup.name} is not one of: "
+                    f"{', '.join(server_groups.POLICIES)}."
+                )
             return
         if not uuidutils.is_uuid_like(server_group_id):
             raise exception.MagnumException(
@@ -1191,7 +1258,7 @@ class Driver(driver.Driver):
             additionalStorageClasses=additional_storage_classes,
         )
 
-    def _process_node_groups(self, cluster, nodegroups):
+    def _process_node_groups(self, cluster, nodegroups, server_group_ids):
         nodegroup_set = []
         for ng in nodegroups:
             if ng.role != NODE_GROUP_ROLE_CONTROLLER:
@@ -1200,9 +1267,8 @@ class Driver(driver.Driver):
                     machineFlavor=ng.flavor_id,
                     machineCount=ng.node_count,
                 )
-                server_group_id = self._get_server_group_id(cluster, ng)
-                if server_group_id:
-                    nodegroup_item["serverGroupId"] = server_group_id
+                if ng.name in server_group_ids:
+                    nodegroup_item["serverGroupId"] = server_group_ids[ng.name]
                 if self._get_autoscale_enabled(cluster):
                     values = self._get_autoscale_values(cluster, ng)
                     nodegroup_item = helm.mergeconcat(nodegroup_item, values)
@@ -1239,6 +1305,10 @@ class Driver(driver.Driver):
 
             image_id, kube_version, os_distro = self._get_image_details(
                 context, cluster.cluster_template.image_id
+            )
+
+            server_group_ids = self._resolve_server_group_ids(
+                context, cluster, nodegroups
             )
 
             network_id = self._get_fixed_network_id(context, cluster)
@@ -1319,7 +1389,9 @@ class Driver(driver.Driver):
                         "enabled": self._get_autoheal_enabled(cluster),
                     },
                 },
-                "nodeGroups": self._process_node_groups(cluster, nodegroups),
+                "nodeGroups": self._process_node_groups(
+                    cluster, nodegroups, server_group_ids
+                ),
                 "addons": {
                     "openstack": {
                         "csiCinder": self._storageclass_definitions(
@@ -1353,15 +1425,14 @@ class Driver(driver.Driver):
                 },
             }
 
-            master_server_group_id = self._label(
-                cluster,
-                "master_server_group_id",
-                lconf.master_server_group_id,
-            )
-            if master_server_group_id:
-                values["controlPlane"][
-                    "serverGroupId"
-                ] = master_server_group_id
+            for ng in nodegroups:
+                if (
+                    ng.role == NODE_GROUP_ROLE_CONTROLLER
+                    and ng.name in server_group_ids
+                ):
+                    values["controlPlane"]["serverGroupId"] = server_group_ids[
+                        ng.name
+                    ]
 
             # Add boot disk details, if defined in config file.
             # Helm chart defaults to ephemeral disks, if unset.
@@ -1574,6 +1645,14 @@ class Driver(driver.Driver):
                     namespace=namespace,
                 )
 
+        # Nova lets a server group be deleted while it still has members,
+        # so there is no need to wait for the machines to be gone.
+        if any(
+            self._uses_managed_server_group(cluster, ng)
+            for ng in cluster.nodegroups
+        ):
+            server_groups.delete_managed(context, cluster)
+
     def resize_cluster(
         self,
         context,
@@ -1649,6 +1728,9 @@ class Driver(driver.Driver):
             cluster,
             exclude_nodegroup_name=nodegroup.name,
         )
+
+        if self._uses_managed_server_group(cluster, nodegroup):
+            server_groups.delete_managed(context, cluster, nodegroup.name)
 
     def rotate_credential(self, context, cluster):
         # Current cluster owner to revert to if rotation fails

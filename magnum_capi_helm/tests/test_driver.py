@@ -23,6 +23,7 @@ from openstack.compute.v2 import _proxy as compute_proxy
 from magnum_capi_helm.common import app_creds
 from magnum_capi_helm.common import ca_certificates
 from magnum_capi_helm.common import capi_monitor
+from magnum_capi_helm.common import server_groups
 from magnum_capi_helm import conf
 from magnum_capi_helm import driver
 from magnum_capi_helm import driver_utils
@@ -2764,6 +2765,206 @@ class ClusterAPIDriverTest(base.DbTestCase):
             ng,
         )
 
+    @mock.patch("magnum.common.clients.OpenStackClients.nova")
+    def test_validate_server_group_policy_ok(self, mock_osc_nova):
+        ng = mock.MagicMock(
+            role="worker", labels={"server_group_policy": "anti-affinity"}
+        )
+
+        self.driver._validate_server_group(self.context, self.cluster_obj, ng)
+
+        mock_osc_nova.assert_not_called()
+
+    def test_validate_server_group_policy_invalid(self):
+        ng = mock.MagicMock(
+            role="worker", labels={"server_group_policy": "spread"}
+        )
+
+        self.assertRaises(
+            exception.MagnumException,
+            self.driver._validate_server_group,
+            self.context,
+            self.cluster_obj,
+            ng,
+        )
+
+    def test_uses_managed_server_group(self):
+        ng = mock.MagicMock(
+            role="worker", labels={"server_group_policy": "anti-affinity"}
+        )
+        self.assertTrue(
+            self.driver._uses_managed_server_group(self.cluster_obj, ng)
+        )
+
+    def test_uses_managed_server_group_explicit_id_wins(self):
+        ng = mock.MagicMock(
+            role="worker",
+            labels={
+                "server_group_policy": "anti-affinity",
+                "server_group_id": str(uuid4()),
+            },
+        )
+        self.assertFalse(
+            self.driver._uses_managed_server_group(self.cluster_obj, ng)
+        )
+
+    def _resolve_nodegroups(self):
+        master = mock.MagicMock(role="master", labels={})
+        master.name = "default-master"
+        worker = mock.MagicMock(
+            role="worker", labels={"server_group_policy": "anti-affinity"}
+        )
+        worker.name = "ng-1"
+        explicit = mock.MagicMock(
+            role="worker", labels={"server_group_id": "explicit-id"}
+        )
+        explicit.name = "ng-2"
+        plain = mock.MagicMock(role="worker", labels={})
+        plain.name = "ng-3"
+        return [master, worker, explicit, plain]
+
+    @mock.patch.object(server_groups, "create", autospec=True)
+    @mock.patch.object(server_groups, "list_managed", autospec=True)
+    def test_resolve_server_group_ids_no_policy(self, mock_list, mock_create):
+        ng = mock.MagicMock(role="worker", labels={})
+
+        ids = self.driver._resolve_server_group_ids(
+            self.context, self.cluster_obj, [ng]
+        )
+
+        self.assertEqual({}, ids)
+        mock_list.assert_not_called()
+        mock_create.assert_not_called()
+
+    @mock.patch.object(server_groups, "create", autospec=True)
+    @mock.patch.object(server_groups, "list_managed", autospec=True)
+    def test_resolve_server_group_ids_creates_missing(
+        self, mock_list, mock_create
+    ):
+        self._set_cluster_test_labels(
+            {"master_server_group_policy": "soft-anti-affinity"}
+        )
+        mock_list.return_value = []
+        mock_create.side_effect = ["master-id", "ng-1-id"]
+        ctx = mock.Mock(project_id=self.cluster_obj.project_id)
+
+        ids = self.driver._resolve_server_group_ids(
+            ctx, self.cluster_obj, self._resolve_nodegroups()
+        )
+
+        self.assertEqual(
+            {
+                "default-master": "master-id",
+                "ng-1": "ng-1-id",
+                "ng-2": "explicit-id",
+            },
+            ids,
+        )
+        self.assertEqual(
+            [
+                mock.call(
+                    ctx,
+                    self.cluster_obj,
+                    "default-master",
+                    "soft-anti-affinity",
+                ),
+                mock.call(ctx, self.cluster_obj, "ng-1", "anti-affinity"),
+            ],
+            mock_create.call_args_list,
+        )
+
+    @mock.patch.object(server_groups, "create", autospec=True)
+    @mock.patch.object(server_groups, "list_managed", autospec=True)
+    def test_resolve_server_group_ids_reuses_existing(
+        self, mock_list, mock_create
+    ):
+        name = server_groups.managed_name(self.cluster_obj, "ng-1")
+        mock_list.return_value = [(name, "existing-id"), (name, "dup-id")]
+        ctx = mock.Mock(project_id=self.cluster_obj.project_id)
+
+        ids = self.driver._resolve_server_group_ids(
+            ctx, self.cluster_obj, self._resolve_nodegroups()
+        )
+
+        self.assertEqual({"ng-1": "existing-id", "ng-2": "explicit-id"}, ids)
+        mock_create.assert_not_called()
+
+    @mock.patch.object(server_groups, "create", autospec=True)
+    @mock.patch.object(server_groups, "list_managed", autospec=True)
+    def test_resolve_server_group_ids_other_project(
+        self, mock_list, mock_create
+    ):
+        mock_list.return_value = []
+        ctx = mock.Mock(project_id="admin-project")
+
+        self.assertRaises(
+            exception.MagnumException,
+            self.driver._resolve_server_group_ids,
+            ctx,
+            self.cluster_obj,
+            self._resolve_nodegroups(),
+        )
+        mock_create.assert_not_called()
+
+    @mock.patch.object(server_groups, "delete_managed", autospec=True)
+    @mock.patch.object(driver.Driver, "_update_helm_release")
+    def test_delete_nodegroup_deletes_managed_server_group(
+        self, mock_update, mock_delete_managed
+    ):
+        ng = mock.MagicMock(
+            role="worker", labels={"server_group_policy": "anti-affinity"}
+        )
+        ng.name = "ng-1"
+
+        self.driver.delete_nodegroup(self.context, self.cluster_obj, ng)
+
+        mock_delete_managed.assert_called_once_with(
+            self.context, self.cluster_obj, "ng-1"
+        )
+
+    @mock.patch.object(server_groups, "delete_managed", autospec=True)
+    @mock.patch.object(driver.Driver, "_update_helm_release")
+    def test_delete_nodegroup_keeps_explicit_server_group(
+        self, mock_update, mock_delete_managed
+    ):
+        ng = mock.MagicMock(
+            role="worker", labels={"server_group_id": str(uuid4())}
+        )
+
+        self.driver.delete_nodegroup(self.context, self.cluster_obj, ng)
+
+        mock_delete_managed.assert_not_called()
+
+    @mock.patch.object(server_groups, "delete_managed", autospec=True)
+    @mock.patch.object(helm.HelmLock, "_acquire_lock", return_value=True)
+    @mock.patch.object(kubernetes.Client, "load", autospec=True)
+    @mock.patch.object(helm.Client, "uninstall_release")
+    def test_delete_cluster_deletes_managed_server_groups(
+        self, mock_uninstall, mock_load, mock_helm_lock, mock_delete_managed
+    ):
+        self._set_cluster_test_labels({"server_group_policy": "affinity"})
+        mock_load.return_value = mock.MagicMock(spec=kubernetes.Client)
+
+        self.driver.delete_cluster(self.context, self.cluster_obj)
+
+        mock_uninstall.assert_called_once()
+        mock_delete_managed.assert_called_once_with(
+            self.context, self.cluster_obj
+        )
+
+    @mock.patch.object(server_groups, "delete_managed", autospec=True)
+    @mock.patch.object(helm.HelmLock, "_acquire_lock", return_value=True)
+    @mock.patch.object(kubernetes.Client, "load", autospec=True)
+    @mock.patch.object(helm.Client, "uninstall_release")
+    def test_delete_cluster_without_server_group_policy(
+        self, mock_uninstall, mock_load, mock_helm_lock, mock_delete_managed
+    ):
+        mock_load.return_value = mock.MagicMock(spec=kubernetes.Client)
+
+        self.driver.delete_cluster(self.context, self.cluster_obj)
+
+        mock_delete_managed.assert_not_called()
+
     @mock.patch.object(driver.Driver, "_validate_allowed_flavor")
     @mock.patch.object(driver.Driver, "_update_helm_release")
     def test_update_nodegroup(
@@ -3946,6 +4147,68 @@ class ClusterAPIDriverTest(base.DbTestCase):
         self.assertTrue(others)
         for ng in others:
             self.assertNotIn("serverGroupId", ng)
+
+    @mock.patch.object(server_groups, "create", autospec=True)
+    @mock.patch.object(server_groups, "list_managed", autospec=True)
+    @mock.patch.object(
+        driver.Driver, "_get_k8s_keystone_auth_enabled", return_value=False
+    )
+    @mock.patch.object(
+        driver.Driver,
+        "_storageclass_definitions",
+        return_value=mock.ANY,
+    )
+    @mock.patch.object(driver.Driver, "_validate_allowed_flavor")
+    @mock.patch.object(helm.HelmLock, "renew", return_value=None)
+    @mock.patch.object(helm.HelmLock, "_acquire_lock", return_value=True)
+    @mock.patch.object(kubernetes.Client, "load", autospec=True)
+    @mock.patch.object(driver.Driver, "_get_image_details", autospec=True)
+    @mock.patch.object(helm.Client, "install_or_upgrade", autospec=True)
+    def test_create_nodegroup_server_group_policy(
+        self,
+        mock_install,
+        mock_image,
+        mock_load,
+        mock_helm_lock,
+        mock_renew,
+        mock_validate_allowed_flavor,
+        mock_storageclasses,
+        mock_get_keystone_auth_enabled,
+        mock_list_managed,
+        mock_create,
+    ):
+        """A server group policy label gets a driver-created server group."""
+        self.cluster_obj.labels = {}
+        self.cluster_obj.save()
+        new_ng = obj_utils.create_test_nodegroup(
+            self.context,
+            uuid=uuid4(),
+            id=791,
+            name="policy-group",
+            labels={"server_group_policy": "soft-anti-affinity"},
+        )
+        self.cluster_obj.nodegroups.append(new_ng)
+        mock_list_managed.return_value = []
+        mock_create.return_value = "created-id"
+        mock_image.return_value = ("imageid1", "1.27.4", "ubuntu")
+        mock_load.return_value = mock.MagicMock(spec=kubernetes.Client)
+
+        self.driver.create_nodegroup(self.context, self.cluster_obj, new_ng)
+
+        mock_create.assert_called_once_with(
+            self.context,
+            self.cluster_obj,
+            "policy-group",
+            "soft-anti-affinity",
+        )
+        helm_install_values = mock_install.call_args[0][3]
+        self.assertNotIn("serverGroupId", helm_install_values["controlPlane"])
+        node_groups = {
+            ng["name"]: ng for ng in helm_install_values["nodeGroups"]
+        }
+        self.assertEqual(
+            "created-id", node_groups["policy-group"]["serverGroupId"]
+        )
 
     @mock.patch.object(
         driver.Driver, "_get_k8s_keystone_auth_enabled", return_value=False

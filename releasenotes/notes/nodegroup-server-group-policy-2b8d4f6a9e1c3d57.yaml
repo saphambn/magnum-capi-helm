@@ -1,0 +1,13 @@
+---
+features:
+  - |
+    The driver can now create and manage the Nova server group of a
+    nodegroup itself. Set the ``server_group_policy`` nodegroup label (or
+    the ``master_server_group_policy`` cluster label for the control plane)
+    to ``affinity``, ``anti-affinity``, ``soft-affinity`` or
+    ``soft-anti-affinity``. The driver creates a server group named
+    ``magnum-<cluster-uuid>-<nodegroup-name>`` in the cluster's project and
+    deletes it with the nodegroup or cluster. An explicit
+    ``server_group_id`` label takes precedence over the policy. Operators
+    can set a default policy with
+    ``[capi_helm_cluster_labels] server_group_policy``.

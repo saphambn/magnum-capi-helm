@@ -53,8 +53,32 @@ pass its ID with the ``server_group_id`` nodegroup label:
 A ``server_group_id`` label on the nodegroup takes precedence over one set on
 the cluster or cluster template. Control plane nodes use the separate
 ``master_server_group_id`` cluster label. The driver checks that the server
-group exists when the cluster or nodegroup is created, and does not create or
-delete server groups.
+group exists when the cluster or nodegroup is created, and never deletes a
+server group passed in this way.
+
+Alternatively, let the driver manage the server group by setting only a
+policy, with the ``server_group_policy`` nodegroup label (or
+``master_server_group_policy`` cluster label for the control plane). The
+policy is one of ``affinity``, ``anti-affinity``, ``soft-affinity`` or
+``soft-anti-affinity``:
+
+.. code-block:: bash
+
+   openstack coe nodegroup create my-cluster my-workers \
+       --flavor m1.large --node-count 3 \
+       --labels server_group_policy=soft-anti-affinity
+
+The driver creates a server group named
+``magnum-<cluster-uuid>-<nodegroup-name>`` in the cluster's project, and
+deletes it when the nodegroup or cluster is deleted. If a ``server_group_id``
+label is also set, it takes precedence and no server group is created.
+Operators can set a default policy for all clusters with
+``[capi_helm_cluster_labels] server_group_policy`` in ``magnum.conf``.
+
+The policy of a server group cannot be changed once it is created, so changing
+the policy label later has no effect on an existing server group. If a
+driver-created server group is deleted by hand, the driver creates a new one on
+the next cluster update, which replaces the nodes of that nodegroup.
 
 .. note::
 

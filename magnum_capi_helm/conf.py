@@ -391,6 +391,41 @@ capi_helm_cluster_labels_opts = [
             "nodes into. Empty means no server group is used."
         ),
     ),
+    cfg.StrOpt(
+        "server_group_policy",
+        default="",
+        choices=[
+            "",
+            "affinity",
+            "anti-affinity",
+            "soft-affinity",
+            "soft-anti-affinity",
+        ],
+        help=(
+            "Policy of a Nova server group that the driver creates for "
+            "each worker nodegroup, and deletes with it. Usually set as a "
+            "nodegroup label; a nodegroup label takes precedence over the "
+            "cluster and template labels. Ignored when server_group_id is "
+            "set. Empty means no server group is created."
+        ),
+    ),
+    cfg.StrOpt(
+        "master_server_group_policy",
+        default="",
+        choices=[
+            "",
+            "affinity",
+            "anti-affinity",
+            "soft-affinity",
+            "soft-anti-affinity",
+        ],
+        help=(
+            "Policy of a Nova server group that the driver creates for the "
+            "control plane nodes, and deletes with the cluster. Ignored "
+            "when master_server_group_id is set. Empty means no server "
+            "group is created."
+        ),
+    ),
     # boot volume
     cfg.StrOpt(
         "boot_volume_type",
