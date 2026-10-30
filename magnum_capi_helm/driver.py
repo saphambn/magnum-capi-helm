@@ -1417,6 +1417,15 @@ class Driver(driver.Driver):
                 cni_config = {"addons": {"cni": {"type": cni_type}}}
                 values = helm.mergeconcat(values, cni_config)
 
+            # Operator-supplied values sit under everything the driver
+            # generates, so that cluster labels keep their effect. A None
+            # from the driver means "not set" and keeps the operator value.
+            values = helm.merge_values(
+                helm.load_values_files(CONF.capi_helm.extra_helm_values_files),
+                values,
+                keep_none=False,
+            )
+
             # Reset the lease's TTL clock now, right before the one step
             # the lock actually needs to protect - everything above this
             # point (DB/Glance/Neutron/Cinder lookups) is unbounded and

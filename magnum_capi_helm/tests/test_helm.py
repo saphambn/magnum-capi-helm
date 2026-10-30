@@ -11,11 +11,14 @@
 #    under the License.
 
 import datetime
+import os
+import tempfile
 from unittest import mock
 
 import requests
 import yaml
 
+from magnum.common import exception
 from magnum.common import utils
 from oslo_concurrency import processutils
 
@@ -42,6 +45,151 @@ class TestHelmClient(base.TestCase):
 
         expected = ["foo", "bar", "bar", "baz"]
         self.assertEqual(expected, result)
+
+    def test_merge_values_dicts(self):
+        defaults = dict(foo="bar", asdf=dict(a="b", c="d"))
+        overrides = dict(asdf=dict(a="c"), new=1)
+
+        result = helm.merge_values(defaults, overrides)
+
+        self.assertEqual(
+            dict(foo="bar", asdf=dict(a="c", c="d"), new=1), result
+        )
+
+    def test_merge_values_lists_replace(self):
+        defaults = dict(mirrors=["a", "b"], other=["x"])
+        overrides = dict(mirrors=["c"])
+
+        result = helm.merge_values(defaults, overrides)
+
+        self.assertEqual(dict(mirrors=["c"], other=["x"]), result)
+
+    def test_merge_values_scalar_replaces_dict(self):
+        result = helm.merge_values(dict(a=dict(b=1)), dict(a="flat"))
+
+        self.assertEqual(dict(a="flat"), result)
+
+    def test_merge_values_none_kept(self):
+        defaults = dict(registryMirrors={"nvcr.io": ["m"], "docker.io": []})
+        overrides = dict(registryMirrors={"nvcr.io": None})
+
+        result = helm.merge_values(defaults, overrides)
+
+        self.assertEqual(
+            dict(registryMirrors={"nvcr.io": None, "docker.io": []}), result
+        )
+
+    def test_merge_values_none_ignored(self):
+        defaults = dict(machineSSHKeyName="file-key", a=dict(b=1))
+        overrides = dict(machineSSHKeyName=None, a=dict(b=None), c=None)
+
+        result = helm.merge_values(defaults, overrides, keep_none=False)
+
+        # A None for a key the defaults lack still reaches Helm, as before
+        self.assertEqual(
+            dict(machineSSHKeyName="file-key", a=dict(b=1), c=None), result
+        )
+
+    def test_merge_values_does_not_modify_inputs(self):
+        defaults = dict(a=dict(b=1))
+        overrides = dict(a=dict(c=2))
+
+        helm.merge_values(defaults, overrides)
+
+        self.assertEqual(dict(a=dict(b=1)), defaults)
+        self.assertEqual(dict(a=dict(c=2)), overrides)
+
+    def _values_file(self, content):
+        fd, path = tempfile.mkstemp(suffix=".yaml")
+        self.addCleanup(os.remove, path)
+        with os.fdopen(fd, "w") as values_file:
+            values_file.write(content)
+        return path
+
+    def test_load_values_files_none(self):
+        self.assertEqual({}, helm.load_values_files([]))
+
+    def test_load_values_files_later_wins(self):
+        first = self._values_file(
+            "registryMirrors:\n"
+            "  docker.io: [https://a/v2/docker]\n"
+            "  quay.io: [https://a/v2/quay]\n"
+            "trustedCAs:\n"
+            "  ca: cert\n"
+        )
+        second = self._values_file(
+            "registryMirrors:\n"
+            "  docker.io: [https://b/v2/docker]\n"
+            "  quay.io: null\n"
+        )
+
+        result = helm.load_values_files([first, second])
+
+        self.assertEqual(
+            {
+                "registryMirrors": {
+                    "docker.io": ["https://b/v2/docker"],
+                    "quay.io": None,
+                },
+                "trustedCAs": {"ca": "cert"},
+            },
+            result,
+        )
+
+    def test_load_values_files_empty_file(self):
+        path = self._values_file("")
+
+        self.assertEqual({}, helm.load_values_files([path]))
+
+    def test_load_values_files_relative_path(self):
+        self.assertRaises(
+            exception.MagnumException,
+            helm.load_values_files,
+            ["values.yaml"],
+        )
+
+    def test_load_values_files_missing(self):
+        path = os.path.join(tempfile.mkdtemp(), "missing.yaml")
+        self.addCleanup(os.rmdir, os.path.dirname(path))
+
+        self.assertRaises(
+            exception.MagnumException, helm.load_values_files, [path]
+        )
+
+    def test_load_values_files_invalid_yaml(self):
+        path = self._values_file("registryMirrors: [unclosed\n")
+
+        self.assertRaises(
+            exception.MagnumException, helm.load_values_files, [path]
+        )
+
+    def test_load_values_files_not_a_mapping(self):
+        path = self._values_file("- a\n- b\n")
+
+        self.assertRaises(
+            exception.MagnumException, helm.load_values_files, [path]
+        )
+
+    @mock.patch.object(helm, "LOG")
+    @mock.patch.object(utils, "execute")
+    def test_install_or_upgrade_does_not_log_values(
+        self, mock_execute, mock_log
+    ):
+        mock_execute.return_value = (
+            '{"name": "r", "config": {"password": "s3cret"}}',
+            "",
+        )
+
+        client = helm.Client()
+        client.install_or_upgrade(
+            "myfirstcluster",
+            "mychart",
+            dict(registryAuth={"r.io": {"password": "s3cret"}}),
+            namespace="mynamespace",
+        )
+
+        mock_log.debug.assert_called_once()
+        self.assertNotIn("s3cret", str(mock_log.debug.call_args))
 
     @mock.patch.object(utils, "execute")
     def test_install_or_upgrade(self, mock_execute):

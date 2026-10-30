@@ -66,6 +66,19 @@ capi_helm_opts = [
             "A cluster label can override this."
         ),
     ),
+    cfg.ListOpt(
+        "extra_helm_values_files",
+        default=[],
+        help=(
+            "Absolute paths of YAML files of extra Helm values to merge into "
+            "the values of every cluster, e.g. to set registryMirrors, "
+            "registryAuth or trustedCAs. Later files take precedence over "
+            "earlier ones, and the values the driver generates take "
+            "precedence over all of them. Mappings are merged, while lists "
+            "and other values replace earlier ones; a null removes a chart "
+            "default. Files are read on every Helm release update."
+        ),
+    ),
     cfg.IntOpt(
         "minimum_flavor_ram",
         default=2048,

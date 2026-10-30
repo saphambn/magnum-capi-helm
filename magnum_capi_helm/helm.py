@@ -13,15 +13,18 @@
 import datetime
 import functools
 import json
+import os
 import pathlib
 import requests
 import time
 import typing as t
 import uuid
 
+from magnum.common import exception
 from magnum.common import utils
 from oslo_concurrency import processutils
 from oslo_log import log as logging
+import yaml
 
 from magnum_capi_helm import conf
 from magnum_capi_helm import kubernetes
@@ -61,6 +64,52 @@ def mergeconcat(defaults, *overrides):
     return functools.reduce(mergeconcat2, overrides, defaults)
 
 
+def merge_values(defaults, overrides, keep_none=True):
+    """Deep-merge two sets of Helm values the way Helm merges values files.
+
+    Mappings are merged recursively, while lists and other values in
+    overrides replace those in defaults. A None in overrides replaces the
+    value in defaults when keep_none is True, so that it reaches Helm and
+    removes a chart default; otherwise the value in defaults is kept.
+    """
+    if isinstance(defaults, dict) and isinstance(overrides, dict):
+        merged = dict(defaults)
+        for key, value in overrides.items():
+            if key in defaults:
+                merged[key] = merge_values(defaults[key], value, keep_none)
+            else:
+                merged[key] = value
+        return merged
+    if overrides is None and not keep_none:
+        return defaults
+    return overrides
+
+
+def load_values_files(paths):
+    """Load and merge YAML files of Helm values, later files winning."""
+    values = {}
+    for path in paths:
+        if not os.path.isabs(path):
+            raise exception.MagnumException(
+                message=f"Helm values file {path} is not an absolute path."
+            )
+        try:
+            with open(path) as values_file:
+                file_values = yaml.safe_load(values_file)
+        except (OSError, yaml.YAMLError) as e:
+            raise exception.MagnumException(
+                message=f"Unable to load Helm values file {path}: {e}"
+            )
+        if file_values is None:
+            file_values = {}
+        if not isinstance(file_values, dict):
+            raise exception.MagnumException(
+                message=f"Helm values file {path} must contain a mapping."
+            )
+        values = merge_values(values, file_values)
+    return values
+
+
 class Client:
     """Client for interacting with Helm CLI."""
 
@@ -70,12 +119,15 @@ class Client:
         self._history_max_revisions = 10
         self._kubeconfig = CONF.capi_helm.kubeconfig_file
 
-    def _run(self, command, **kwargs) -> bytes:
+    def _run(self, command, log_output=True, **kwargs) -> bytes:
         command = [self._executable] + command
         if self._kubeconfig:
             command.extend(["--kubeconfig", self._kubeconfig])
         stdout, stderr = utils.execute(*command, **kwargs)
-        LOG.debug(f"Ran helm {command} got out:{stdout} err:{stderr}")
+        if log_output:
+            LOG.debug(f"Ran helm {command} got out:{stdout} err:{stderr}")
+        else:
+            LOG.debug(f"Ran helm {command} got err:{stderr}")
         return stdout
 
     def install_or_upgrade(
@@ -115,7 +167,11 @@ class Client:
             ]
 
         process_input = json.dumps(mergeconcat({}, *values))
-        return json.loads(self._run(command, process_input=process_input))
+        # The output echoes the values back, and they may contain secrets
+        # such as registry credentials, so it must not be logged
+        return json.loads(
+            self._run(command, log_output=False, process_input=process_input)
+        )
 
     def uninstall_release(
         self,
